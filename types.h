@@ -20,3 +20,4 @@ typedef int bool_t;
 #define nullptr (void*)0
 
 
+#define BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))

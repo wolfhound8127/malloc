@@ -1,27 +1,25 @@
 
-#include "nvcom02t/nvcom02t.h"
 #include "mem.h"
 
+#include <stdlib.h>
+uint32_t rand_size(uint32_t max)
+{
+	return (uint32_t)rand() % max;
+}
 
 mem_pool_t mpool;
-
-unsigned char heap[0x2000];
+#define HEAP_SIZE 0x10000
+unsigned char heap[HEAP_SIZE];
 
 int main()
 {
+	void *heap_start = &heap[0];
+	void *heap_end = &heap[HEAP_SIZE - 1];
+	mem_init(&mpool, heap_start, heap_end);
 
-	mem_init(&mpool, &heap[0], &heap[0x2000-1]);
-	void *p0 = mem_alloc(&mpool, 7);
-	void *p1 = mem_alloc(&mpool, 16);
-	void *p2 = mem_alloc(&mpool, 20);
-	void *p3 = mem_alloc(&mpool, 24);
-	void *p4 = mem_alloc(&mpool, 64);
-	void *p5 = mem_alloc(&mpool, 17);
-	void *p6 = mem_alloc(&mpool, 23);
-
-	mem_free(&mpool, p2);
-	mem_free(&mpool, p4);
-	mem_free(&mpool, p3);
+	srand(1);
+	
+	bool_t ok = mem_test_1(&mpool, rand_size);
 
 	while(1);
 }

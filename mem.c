@@ -1,68 +1,51 @@
 #include "mem.h"
 
-void mem_init (mem_pool_t *mpool, void *start, void *stop)
-{
-    mpool->blocks_list = nullptr;
-    mpool->free_mem_size = 0;
-    mpool->used_mem_size = 0;
 
-    if( sizeof(mheader_t) % SIZEOF_POINTER != 0)
-        return;
-
-    void *aligned_start = (void*)MEM_ALIGN((uint32_t)start);
-    mheader_t *free_block = (mheader_t *)aligned_start ;
-    free_block->size = (uint32_t)stop - (uint32_t)aligned_start  - sizeof(mheader_t);
-    free_block->is_available = 1;
-
-    mem_blocks_list_insert(mpool, mpool->blocks_list, free_block);
-    mpool->free_mem_size = free_block->size;
-
-}
-static
-inline  __attribute__ ((always_inline))
-mheader_t* mem_next_mheader(mheader_t *h)
-{
-    return h->next;
-}
-
-static
-inline  __attribute__ ((always_inline))
-mheader_t* mem_prev_mheader(mheader_t *h)
-{
-    return h->prev;
-}
-
+/*
+ * Обнуление ссылок удаляемого блока
+ * Обновление ссылок соседей
+ * 
+ * r1. Удаление единственного блока возвращает nullptr
+ * r2. В остальных случаях возвращает предыдущий блок
+*/
 mheader_t *mem_blocks_list_remove(mem_pool_t *mpool, mheader_t *block)
 {
-    mheader_t *prev;
-    if(block->next != block->prev )
+    if(!block)
+        return nullptr;
+
+    mheader_t *prev = nullptr;
+    if(block != block->prev )
     {
-
-        prev = block->prev;
-
 
         block->prev->next = block->next;
         block->next->prev = block->prev;
-        
-        block->next = block->prev = nullptr;
+
+        prev = block->prev;
 
     }
-    else
-    {
-        block->next = block->prev = nullptr;
-        prev = nullptr;
-        
 
-    }
+    block->next = block->prev = nullptr;
+
+    
     mpool->blocks_list = prev;
 
     return prev;
 }
 
+/*
+ * Добавляемый блок единственный: (prev == nullptr)
+ * Установка ссылок блока на себя самого
+ * 
+ * Добавляемый блок не единственный: (prev != nullptr)
+ * Обновление ссылок соседей
+*/
 void mem_blocks_list_insert(mem_pool_t *mpool, mheader_t *prev, mheader_t *block)
 {
 
-    if(prev == nullptr || block == prev)
+    if(!block || prev == block )
+        return;
+
+    if(prev == nullptr)
     {
         block->next = block;
         block->prev = block;
@@ -83,84 +66,182 @@ mheader_t *mem_find_suitable_block(mem_pool_t *mpool,  uint32_t required_size)
 {
     mheader_t *block = mpool->blocks_list;
 
-    while (block->is_available == 0 || block->size < required_size)
+    do
     {
+        if(block->size >= required_size && block->is_available)
+            return block;
 
-        block = mem_next_mheader(block);
+        block = block->next;
 
-        if(block == mpool->blocks_list)
-            return nullptr;
-    }
+    } while (block != mpool->blocks_list);
+    
 
-    return block;
+    return nullptr;
 }
+static
+inline  __attribute__ ((always_inline))
+void mem_change_free_size_stat(mem_pool_t *mpool, int32_t size)
+{
+    mpool->free_mem_size += size;
+    mpool->used_mem_size -= size;
+}
+
+void mem_init (mem_pool_t *mpool, void *start, void *stop)
+{
+    /* Размер структуры заголовка должен быть равен выравниванию */
+    BUILD_BUG_ON( sizeof(mheader_t) % SIZEOF_POINTER );
+
+    mpool->blocks_list = nullptr;
+    mpool->used_mem_size = 0;
+
+    /* Выравнивание начала пула */
+    void *aligned_start = (void*)MEM_ALIGN((uint32_t)start);
+    mheader_t *free_block = (mheader_t *)aligned_start ;
+    free_block->size = (uint32_t)stop - (uint32_t)aligned_start  - sizeof(mheader_t);
+    free_block->is_available = 1;
+
+    /* Добавление первого свободного блока размером с весь пул */
+    mem_blocks_list_insert(mpool, mpool->blocks_list, free_block);
+    mpool->free_mem_size = free_block->size;
+    mpool->used_mem_size = sizeof(mheader_t);
+
+
+}
+
 
 void *mem_alloc(mem_pool_t *mpool, uint32_t size)
 {
 
     uint32_t required_size = MEM_ALIGN (size);
 
-    mheader_t *suitable_block = mem_find_suitable_block(mpool, required_size);
+    mheader_t *new_used_block = mem_find_suitable_block(mpool, required_size);
+    if(!new_used_block) return nullptr;
 
-    uint32_t left_free_space = suitable_block->size - required_size;
+    uint32_t left_free_space = new_used_block->size - required_size;
 
-    mheader_t *new_used_block = suitable_block;
     new_used_block->size = required_size;
+    mem_change_free_size_stat(mpool, -required_size);
     new_used_block->is_available = 0;
 
 
-    
     if(left_free_space >= sizeof(mheader_t))
     {
-        mheader_t *new_free_block = (uint8_t*)new_used_block + sizeof(mheader_t) + new_used_block->size;
-        new_free_block->size = left_free_space - sizeof(mheader_t);
-        new_free_block->is_available = 1;
-        mem_blocks_list_insert(mpool, new_used_block, new_free_block);
+        mheader_t *next = (mheader_t *)((uint8_t*)new_used_block + sizeof(mheader_t) + new_used_block->size);
+        next->size = left_free_space - sizeof(mheader_t);
+        mem_change_free_size_stat(mpool, -sizeof(mheader_t));
+        next->is_available = 1;
+        mem_blocks_list_insert(mpool, new_used_block, next);
     }
 
-    mpool->free_mem_size -= required_size;
-    mpool->used_mem_size += required_size;
 
-    return (void*)((uint8_t*)new_used_block + sizeof(mheader_t));
+    return MHEADER_TO_VOIDPTR(new_used_block);
 
 }
 
 void mem_free(mem_pool_t *mpool, void *p)
 {
-    mheader_t *block = (uint8_t*)p - sizeof(mheader_t);
+
+    mheader_t *block = VOIDPTR_TO_MHEADER(p);
+    if(block->is_available)
+    	return;
 
     block->is_available = 1;
 
-    mpool->free_mem_size += block->size;
-    mpool->used_mem_size -= block->size;
+    mem_change_free_size_stat(mpool, block->size);
 
-    mem_join_free(mpool, block);
+    mem_connect_nearby_free_blocks(mpool, block);
 }
 
-void mem_join_free(mem_pool_t *mpool, mheader_t *block)
+void mem_connect_nearby_free_blocks(mem_pool_t *mpool, mheader_t *block)
 {
     if(!block || block->is_available == 0)
-        return nullptr;
+        return;
 
-    mheader_t *next = mem_next_mheader(block);
-    while(next->is_available)
+
+    mheader_t *next = block->next;
+    while(next->is_available && next != next->next)
     {
         block->size += next->size;
-        mpool->free_mem_size += sizeof(mheader_t);
-        mpool->used_mem_size -= sizeof(mheader_t);
+        mem_change_free_size_stat(mpool, sizeof(mheader_t));
         block = mem_blocks_list_remove(mpool, next);
-        next = mem_next_mheader(block);
+        next = block->next;
     }
 
-    mheader_t *prev = mem_prev_mheader(block);
-    while (prev->is_available)
+    mheader_t *prev = block->prev;
+    while (prev->is_available && prev != prev->prev)
     {
-        prev->size += mem_next_mheader(prev)->size;
-        mpool->free_mem_size += sizeof(mheader_t);
-        mpool->used_mem_size -= sizeof(mheader_t);
-        block = mem_blocks_list_remove(mpool, mem_next_mheader(prev));
-        prev = mem_prev_mheader(block);
+
+        prev->size += prev->next->size;
+        mem_change_free_size_stat(mpool, sizeof(mheader_t));
+        block = mem_blocks_list_remove(mpool, prev->next);
+        prev = block->prev;
     }
+
+}
+
+bool_t mem_force_provide_suitable_block(mem_pool_t *mpool, uint32_t size)
+{
+    mheader_t *block = mpool->blocks_list;
+    do
+    {
+        if(block->size >= size)
+        {
+            if(!block->is_available)
+            {
+                mem_free(mpool, MHEADER_TO_VOIDPTR(block));
+            }
+
+            return true;
+        }
+
+        block = block->next;
+
+    } while (block != mpool->blocks_list);
+    
+
+    return false;
+}
+
+
+bool_t mem_test_1(mem_pool_t *mpool, uint32_t (*rand)(uint32_t))
+{
+    uint32_t free_space = mpool->free_mem_size;
+	uint32_t used_space = mpool->used_mem_size;
+
+    uint32_t random_number;
+    bool_t ok = true;
+	do
+	{
+		random_number = rand(mpool->free_mem_size);
+        if(random_number > mpool->free_mem_size>>1)
+        {
+            ok = mem_force_provide_suitable_block(mpool, random_number);
+        }
+        else
+        {
+            ok = (mem_alloc(mpool, random_number) != nullptr);
+        }
+		
+	} while (ok);
+
+    mheader_t *block;
+    do
+    {
+        block = mpool->blocks_list;
+        while (block->is_available == 1)  
+        {
+            if(block->prev == block)
+                break;
+                
+            block = block->next;
+        }
+        
+        mem_free(mpool, MHEADER_TO_VOIDPTR(block));
+
+    } while (block->prev != block);
+
+
+    return (free_space == mpool->free_mem_size) && (used_space == mpool->used_mem_size);
 
 }
 
