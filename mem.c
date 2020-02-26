@@ -2,11 +2,10 @@
 
 
 /*
- * Обнуление ссылок удаляемого блока
- * Обновление ссылок соседей
+ * Удаление блока из списка и обновление ссылок между соседними элементами.
  * 
- * r1. Удаление единственного блока возвращает nullptr
- * r2. В остальных случаях возвращает предыдущий блок
+ * return1: Удаление единственного блока возвращает nullptr.
+ * return2: В остальных случаях возвращает предыдущий блок.
 */
 mheader_t *mem_blocks_list_remove(mem_pool_t *mpool, mheader_t *block)
 {
@@ -33,11 +32,10 @@ mheader_t *mem_blocks_list_remove(mem_pool_t *mpool, mheader_t *block)
 }
 
 /*
- * Добавляемый блок единственный: (prev == nullptr)
- * Установка ссылок блока на себя самого
+ * Добавление нового блока в список и обновление ссылок между соседними элементами.
  * 
- * Добавляемый блок не единственный: (prev != nullptr)
- * Обновление ссылок соседей
+ * Если добавляемый блок единственный: (prev == nullptr)
+ * ссылки блока устанавливаются на себя самого
 */
 void mem_blocks_list_insert(mem_pool_t *mpool, mheader_t *prev, mheader_t *block)
 {
@@ -62,6 +60,9 @@ void mem_blocks_list_insert(mem_pool_t *mpool, mheader_t *prev, mheader_t *block
     mpool->blocks_list = block;
 }
 
+/*
+ * Поиск подходящего по размеру блока из списка
+*/
 mheader_t *mem_find_suitable_block(mem_pool_t *mpool,  uint32_t required_size)
 {
     mheader_t *block = mpool->blocks_list;
@@ -78,6 +79,12 @@ mheader_t *mem_find_suitable_block(mem_pool_t *mpool,  uint32_t required_size)
 
     return nullptr;
 }
+
+/* 
+ * Обновление статистики используемой/свободной памяти
+ * Положительное значение параметра size увеличивает количество доступной памяти,
+ * отриацательное - уменьшает.
+*/
 static
 inline  __attribute__ ((always_inline))
 void mem_change_free_size_stat(mem_pool_t *mpool, int32_t size)
@@ -86,6 +93,9 @@ void mem_change_free_size_stat(mem_pool_t *mpool, int32_t size)
     mpool->used_mem_size -= size;
 }
 
+/*
+ * Начальная инициализация пула памяти
+ * */
 void mem_init (mem_pool_t *mpool, void *start, void *stop)
 {
     /* Размер структуры заголовка должен быть равен выравниванию */
@@ -96,19 +106,25 @@ void mem_init (mem_pool_t *mpool, void *start, void *stop)
 
     /* Выравнивание начала пула */
     void *aligned_start = (void*)MEM_ALIGN((uint32_t)start);
+
+
+    /* Добавление первого свободного блока размером с весь пул */
     mheader_t *free_block = (mheader_t *)aligned_start ;
     free_block->size = (uint32_t)stop - (uint32_t)aligned_start  - sizeof(mheader_t);
     free_block->is_available = 1;
-
-    /* Добавление первого свободного блока размером с весь пул */
     mem_blocks_list_insert(mpool, mpool->blocks_list, free_block);
+
+    
     mpool->free_mem_size = free_block->size;
+    /* Заголовок свободного блока считается используемой памятью*/
     mpool->used_mem_size = sizeof(mheader_t);
 
 
 }
 
-
+/* 
+ * Выделение памяти
+ */
 void *mem_alloc(mem_pool_t *mpool, uint32_t size)
 {
 
@@ -138,6 +154,12 @@ void *mem_alloc(mem_pool_t *mpool, uint32_t size)
 
 }
 
+/*
+ * Освобождение памяти, выделенной под указатель
+ * Если рядом с освобождаемым блоком есть другие свободные блоки,
+ * то выполняется дефрагментация:
+ * последовательность свободных блоков объединятся в один блок.
+ * */
 void mem_free(mem_pool_t *mpool, void *p)
 {
 
@@ -152,26 +174,28 @@ void mem_free(mem_pool_t *mpool, void *p)
     mem_connect_nearby_free_blocks(mpool, block);
 }
 
+/* Дефрагментация: последовательность свободных блоков рядом объединятся в один блок.*/
 void mem_connect_nearby_free_blocks(mem_pool_t *mpool, mheader_t *block)
 {
     if(!block || block->is_available == 0)
         return;
 
-
+    /* Поиск следующих в списке свободных блоков
+     * и объединение с текущим*/
     mheader_t *next = block->next;
     while(next->is_available && next != next->next)
     {
-        block->size += next->size;
+        block->size += next->size + sizeof(mheader_t);//!!!!
         mem_change_free_size_stat(mpool, sizeof(mheader_t));
         block = mem_blocks_list_remove(mpool, next);
         next = block->next;
     }
 
+    /* Поиск предшествующих в списке свободных блоков и объединение */
     mheader_t *prev = block->prev;
     while (prev->is_available && prev != prev->prev)
     {
-
-        prev->size += prev->next->size;
+        prev->size += prev->next->size +  sizeof(mheader_t);//!!!!
         mem_change_free_size_stat(mpool, sizeof(mheader_t));
         block = mem_blocks_list_remove(mpool, prev->next);
         prev = block->prev;
@@ -179,6 +203,7 @@ void mem_connect_nearby_free_blocks(mem_pool_t *mpool, mheader_t *block)
 
 }
 
+/* Принудительно обеспечить пул свободным блоком указанного размера */
 bool_t mem_force_provide_suitable_block(mem_pool_t *mpool, uint32_t size)
 {
     mheader_t *block = mpool->blocks_list;
@@ -202,7 +227,19 @@ bool_t mem_force_provide_suitable_block(mem_pool_t *mpool, uint32_t size)
     return false;
 }
 
-
+/* Тестирование пула.
+ * Выделяется память до полного заполнения пула.
+ * Размер размещаемого блока задается с помощью функции rand
+ * Функция rand должна возвращать положительное число в пределах [0, mpool->free_mem_size)
+ * Если случайное число больше половины свободной памяти в пуле,
+ * то вызывается функция mem_force_provide_suitable_block
+ * Если случайное число больше половины свободной памяти в пуле,
+ * то выделяется блок памяти указанного размера
+ * 
+ * Как только весь пул будет заполнен, выполняется полная очитка пула.
+ * Если счетчики статистики совпадают с первоначальными значениями, 
+ * то считается, что тест пройден успешно. 
+ */
 bool_t mem_test_1(mem_pool_t *mpool, uint32_t (*rand)(uint32_t))
 {
     uint32_t free_space = mpool->free_mem_size;
